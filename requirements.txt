@@ -1,0 +1,28 @@
+openai-whisper
+gTTS
+sounddevice
+numpy
+scipy
+pygame
+google-generativeai
+python-dotenv
+groq
+coqui-tts
+torch
+fastapi
+uvicorn
+jinja2
+websockets
+pydub
+soundfile
+aiofiles
+python-multipart
+livekit
+livekit-agents
+livekit-api
+edge-tts
+
+# Intelligibility: Can you understand every word clearly? Are any words mumbled or distorted?
+# Naturalness: Does the voice sound human-like, or is it robotic/monotone?
+# Artifact Absence: Are there any glitches, static, or unnatural sounds?
+# Consistency: Does the voice maintain consistent tone and pronunciation?
