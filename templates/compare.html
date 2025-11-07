@@ -1,0 +1,1238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Comparison - WebSocket vs HTTP Streaming</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        select {
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            width: 150px;
+        }
+        button {
+            padding: 12px 30px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .comparison-group {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f0f8ff;
+            border-radius: 5px;
+        }
+        .comparison-btn {
+            background-color: #28a745;
+            margin: 5px;
+        }
+        .comparison-btn:hover {
+            background-color: #218838;
+        }
+        .response-container {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            border: 1px solid #dee2e6;
+        }
+        .streaming-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .support-message {
+            margin-top: 15px;
+            padding: 15px;
+            background-color: #e7f3ff;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .option-btn {
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .option-btn:hover {
+            background-color: #218838;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.streaming {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status.complete {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        audio {
+            margin-top: 10px;
+            width: 100%;
+        }
+        #comparisonResults {
+            margin-top: 20px;
+            padding: 15px;
+            background: #d4edda;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Voice Agent Comparison: WebSocket vs HTTP Streaming</h1>
+        <p>Select STT, LLM, and TTS modes, then press <strong>Start</strong> to begin recording, speak, and press <strong>End</strong> to process and compare responses. Use <strong>Compare Latencies</strong> to analyze TTFC.</p>
+        
+        <div class="input-group">
+            <select id="sttSelect">
+                <option value="local">Local Whisper (Offline)</option>
+                <option value="groq">Groq Whisper (Online)</option>
+            </select>
+            <select id="llmSelect">
+                <option value="gemini">Gemini (Google)</option>
+                <option value="groq">Groq (Llama3)</option>
+            </select>
+            <select id="ttsSelect">
+                <option value="gtts">gTTS (Simple)</option>
+                <option value="coqui">Coqui (Voice Cloning)</option>
+                <option value="kokoro">Kokoro (Realistic)</option>
+                <option value="edge">Edge TTS (Microsoft)</option>
+            </select>
+            <button id="startBtn" onclick="startConversation()">Start</button>
+            <button id="endBtn" onclick="stopConversation()" disabled>End</button>
+            <a href="/voice_agent"><button>Back to Main Interface</button></a>
+        </div>
+
+        <div class="comparison-group">
+            <h3>Simulated Latency Comparison (TTFC)</h3>
+            <button class="comparison-btn" onclick="compareLatencies()">Compare Latencies</button>
+            <div id="comparisonResults" style="display: none;"></div>
+        </div>
+
+        <div class="status" id="status" style="display: none;"></div>
+
+        <div class="response-container">
+            <div class="streaming-text" id="response">Conversation will appear here...</div>
+            <div id="supportMessage"></div>
+            <audio id="audioPlayer" controls><source src="" type="audio/mp3"></audio>
+        </div>
+    </div>
+
+    <script>
+        const COMPARE_BASE = 'http://127.0.0.1:8000/compare';
+        let mediaRecorder;
+        let audioChunks = [];
+        let stream;
+        let audioContext;
+        let analyser;
+        let isRecording = false;
+        let assistantIsSpeaking = false;       // Blocks audio playback overlap
+        let wsComplete = false;               // Tracks WebSocket completion
+        let httpComplete = false;             // Tracks HTTP completion
+        const TIMESLICE = 100;                // 100 ms chunks
+
+        function setStatus(msg, type) {
+            const el = document.getElementById('status');
+            el.textContent = msg;
+            el.className = 'status ' + type;
+            el.style.display = 'block';
+        }
+
+        async function checkMicPermission() {
+            try {
+                const permissionStatus = await navigator.permissions.query({ name: 'microphone' });
+                console.log(`Microphone permission state: ${permissionStatus.state}`);
+                if (permissionStatus.state === 'denied') {
+                    throw new Error('Microphone permission denied. Please allow microphone access in your browser settings (e.g., chrome://settings/content/microphone) and refresh the page.');
+                }
+                if (permissionStatus.state === 'prompt') {
+                    setStatus('Microphone access requires permission. Please allow microphone access when prompted and click Start again.', 'error');
+                    // Attempt to trigger permission prompt
+                    await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop()));
+                    return false;
+                }
+                return permissionStatus.state === 'granted';
+            } catch (e) {
+                console.error('Permission check error:', e);
+                setStatus(e.message, 'error');
+                return false;
+            }
+        }
+
+        async function getUserMediaWithRetry(maxRetries = 5, delayMs = 1000) {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    console.log(`getUserMedia succeeded on attempt ${attempt}`);
+                    return stream;
+                } catch (e) {
+                    console.warn(`getUserMedia attempt ${attempt} failed: ${e.message}`);
+                    if (attempt < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, delayMs));
+                    } else {
+                        throw new Error(`Failed to access microphone after ${maxRetries} attempts: ${e.message}. Ensure no other app is using the microphone and check browser settings.`);
+                    }
+                }
+            }
+        }
+
+        async function startConversation() {
+            const sttMode = document.getElementById('sttSelect').value;
+            const llmMode = document.getElementById('llmSelect').value;
+            const ttsMode = document.getElementById('ttsSelect').value;
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('endBtn').disabled = false;
+            document.getElementById('response').textContent = '';
+            document.getElementById('supportMessage').innerHTML = '';
+            document.getElementById('audioPlayer').src = '';
+            setStatus('Recording… Please speak clearly.', 'streaming');
+
+            try {
+                const hasPermission = await checkMicPermission();
+                if (!hasPermission) {
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('endBtn').disabled = true;
+                    return;
+                }
+
+                // Clean up existing resources
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = null;
+                }
+                if (audioContext && audioContext.state !== 'closed') {
+                    await audioContext.close();
+                    audioContext = null;
+                }
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                    mediaRecorder = null;
+                }
+
+                stream = await getUserMediaWithRetry();
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+                analyser.fftSize = 2048;
+                const dataArray = new Float32Array(analyser.fftSize);
+
+                const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+                console.log(`Using mimeType: ${mimeType}`);
+                audioChunks = [];
+                mediaRecorder = new MediaRecorder(stream, { mimeType });
+                mediaRecorder.ondataavailable = e => {
+                    if (e.data.size > 0) {
+                        audioChunks.push(e.data);
+                        console.log(`Audio chunk received: ${e.data.size} bytes`);
+                    } else {
+                        console.log('Empty audio chunk received');
+                    }
+                };
+                mediaRecorder.onstop = () => console.log('MediaRecorder stopped');
+                mediaRecorder.start(TIMESLICE);
+                isRecording = true;
+                console.log('Recording started');
+
+                // Monitor audio input to confirm microphone activity
+                function monitorAudio() {
+                    if (!isRecording) return;
+                    analyser.getFloatTimeDomainData(dataArray);
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+                    const rms = Math.sqrt(sum / dataArray.length);
+                    const db = 20 * Math.log10(rms + Number.EPSILON);
+                    console.log(`Audio level: ${db.toFixed(2)} dB`);
+                    requestAnimationFrame(monitorAudio);
+                }
+                requestAnimationFrame(monitorAudio);
+            } catch (e) {
+                console.error('Start error:', e);
+                setStatus(`Recording failed: ${e.message}. Please check microphone permissions, ensure no other app is using the microphone, or refresh the page.`, 'error');
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                if (audioContext && audioContext.state !== 'closed') audioContext.close();
+                stream = null;
+                audioContext = null;
+                mediaRecorder = null;
+            }
+        }
+
+        async function stopConversation() {
+            if (!isRecording) {
+                console.log('Not recording, skipping stop');
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                setStatus('Conversation ended', 'complete');
+                return;
+            }
+
+            isRecording = false;
+            const sttMode = document.getElementById('sttSelect').value;
+            const llmMode = document.getElementById('llmSelect').value;
+            const ttsMode = document.getElementById('ttsSelect').value;
+
+            try {
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                    console.log('MediaRecorder stopped in stopConversation');
+                }
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = null;
+                    console.log('MediaStream stopped');
+                }
+                if (audioContext && audioContext.state !== 'closed') {
+                    await audioContext.close();
+                    audioContext = null;
+                    console.log('AudioContext closed');
+                }
+
+                setStatus('Processing audio...', 'streaming');
+
+                // Process audio after stopping
+                if (audioChunks.length === 0 || audioChunks.every(c => c.size === 0)) {
+                    console.log('Empty audio – no query sent');
+                    setStatus('No audio detected. Please speak clearly and try again.', 'error');
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('endBtn').disabled = true;
+                    mediaRecorder = null;
+                    audioChunks = [];
+                    return;
+                }
+
+                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                console.log(`Audio blob created: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
+                audioChunks = [];
+
+                // Process WebSocket then HTTP
+                await processWebSocket(audioBlob, sttMode, llmMode, ttsMode);
+                await processHttp(audioBlob, sttMode, llmMode, ttsMode);
+
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                mediaRecorder = null;
+                setStatus('Conversation ended', 'complete');
+                console.log('Conversation stopped');
+            } catch (e) {
+                console.error('Stop error:', e);
+                setStatus(`Processing failed: ${e.message}. Please try again or refresh the page.`, 'error');
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                mediaRecorder = null;
+                audioChunks = [];
+            }
+        }
+
+        async function processWebSocket(audioBlob, sttMode, llmMode, ttsMode) {
+            return new Promise((resolve) => {
+                const wsUrl = `${COMPARE_BASE}/ws-stream?stt_mode=${sttMode}&tts_mode=${ttsMode}&llm_mode=${llmMode}`.replace('http://', 'ws://');
+                console.log(`Connecting to WebSocket: ${wsUrl}`);
+                const ws = new WebSocket(wsUrl);
+                const startTime = performance.now();
+                let transcription = '';
+                let fullResponse = '';
+
+                ws.onopen = () => {
+                    console.log('WebSocket Connected');
+                    ws.send(audioBlob);
+                    console.log('Audio blob sent to WebSocket');
+                };
+                ws.onmessage = async (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log('WebSocket message received:', data);
+                        if (data.type === 'transcription') {
+                            transcription = data.text.trim();
+                            if (transcription) {
+                                document.getElementById('response').textContent += `\nWebSocket Transcription: ${data.text}\n`;
+                            } else {
+                                console.log('Empty transcription received');
+                            }
+                        } else if (data.type === 'text_chunk' && data.chunk) {
+                            fullResponse += data.chunk;
+                            document.getElementById('response').textContent = document.getElementById('response').textContent.replace(/WebSocket Response:[^\n]*/g, '');
+                            document.getElementById('response').textContent += `WebSocket Response: ${fullResponse}`;
+                            if (data.ttfc) {
+                                const clientTtfc = performance.now() - startTime;
+                                document.getElementById('response').textContent += `\nWebSocket TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)\n`;
+                                console.log(`WebSocket TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)`);
+                            }
+                        } else if (data.type === 'complete') {
+                            setStatus('WebSocket Complete!', 'complete');
+                            if (data.supportMessage) displaySupportMessage(data.supportMessage);
+                            wsComplete = true;
+                            resolve();
+                        } else if (data.type === 'error') {
+                            console.error('WebSocket error:', data.message);
+                            setStatus('WebSocket Error: ' + data.message, 'error');
+                            wsComplete = true;
+                            resolve();
+                        }
+                    } catch (e) {
+                        console.log('WebSocket binary message (audio) received');
+                        try {
+                            const audioBlob = new Blob([event.data], { type: 'audio/mp3' });
+                            console.log(`WebSocket audio blob received: ${audioBlob.size} bytes`);
+                            document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                            document.getElementById('audioPlayer').play();
+                            assistantIsSpeaking = true;
+                            document.getElementById('audioPlayer').onended = () => {
+                                assistantIsSpeaking = false;
+                                wsComplete = true;
+                                console.log('WebSocket audio playback completed');
+                                resolve();
+                            };
+                            setStatus('Playing WebSocket audio...', 'complete');
+                        } catch (audioError) {
+                            console.error('WebSocket audio playback error:', audioError);
+                            setStatus('WebSocket audio playback failed: ' + audioError.message, 'error');
+                            wsComplete = true;
+                            resolve();
+                        }
+                    }
+                };
+                ws.onerror = (err) => {
+                    console.error('WebSocket Error:', err);
+                    setStatus('WebSocket Error: Connection failed', 'error');
+                    wsComplete = true;
+                    resolve();
+                };
+                ws.onclose = () => {
+                    console.log('WebSocket Closed');
+                    if (wsComplete && httpComplete) setStatus('Conversation ended', 'complete');
+                    resolve();
+                };
+            });
+        }
+
+        async function processHttp(audioBlob, sttMode, llmMode, ttsMode) {
+            return new Promise((resolve) => {
+                const formData = new FormData();
+                formData.append('file', audioBlob, 'query.webm');
+                console.log(`Sending HTTP request with audio blob: ${audioBlob.size} bytes`);
+                const startTime = performance.now();
+                let transcription = '';
+
+                fetch(`${COMPARE_BASE}/http-stream?stt_mode=${sttMode}&tts_mode=${ttsMode}&llm_mode=${llmMode}`, {
+                    method: 'POST',
+                    body: formData
+                }).then(res => {
+                    if (!res.ok) {
+                        return res.text().then(errorText => {
+                            console.error('HTTP Error:', errorText);
+                            setStatus('HTTP Error: ' + errorText, 'error');
+                            httpComplete = true;
+                            resolve();
+                            throw new Error(errorText);
+                        });
+                    }
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    let fullResponse = '';
+
+                    async function readStream() {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) {
+                                console.log('HTTP stream ended');
+                                httpComplete = true;
+                                resolve();
+                                break;
+                            }
+                            buffer += decoder.decode(value, { stream: true });
+                            const lines = buffer.split('\n\n');
+                            buffer = lines.pop();
+                            for (const line of lines) {
+                                console.log('HTTP SSE line:', line);
+                                if (line.startsWith('event: done')) {
+                                    setStatus('HTTP Complete!', 'complete');
+                                    continue;
+                                }
+                                if (!line.startsWith('data: ')) continue;
+                                const dataStr = line.slice(6).trim();
+                                if (dataStr === '[DONE]') continue;
+                                if (dataStr) {
+                                    try {
+                                        const data = JSON.parse(dataStr);
+                                        if (data.type === 'transcription') {
+                                            transcription = data.text.trim();
+                                            if (transcription) {
+                                                document.getElementById('response').textContent += `\nHTTP Transcription: ${data.text}\n`;
+                                            } else {
+                                                console.log('Empty HTTP transcription received');
+                                            }
+                                        } else if (data.type === 'text_chunk' && data.chunk) {
+                                            fullResponse += data.chunk;
+                                            document.getElementById('response').textContent = document.getElementById('response').textContent.replace(/HTTP Response:[^\n]*/g, '');
+                                            document.getElementById('response').textContent += `HTTP Response: ${fullResponse}`;
+                                            if (data.ttfc) {
+                                                const clientTtfc = performance.now() - startTime;
+                                                document.getElementById('response').textContent += `\nHTTP TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)\n`;
+                                                console.log(`HTTP TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)`);
+                                            }
+                                        } else if (data.type === 'audio') {
+                                            try {
+                                                const audioBlob = new Blob([hexToBytes(data.data)], { type: 'audio/mp3' });
+                                                console.log(`HTTP audio blob received: ${audioBlob.size} bytes`);
+                                                document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                                                document.getElementById('audioPlayer').play();
+                                                assistantIsSpeaking = true;
+                                                document.getElementById('audioPlayer').onended = () => {
+                                                    assistantIsSpeaking = false;
+                                                    httpComplete = true;
+                                                    console.log('HTTP audio playback completed');
+                                                    resolve();
+                                                };
+                                                setStatus('Playing HTTP audio...', 'complete');
+                                            } catch (audioError) {
+                                                console.error('HTTP audio playback error:', audioError);
+                                                setStatus('HTTP audio playback failed: ' + audioError.message, 'error');
+                                                httpComplete = true;
+                                                resolve();
+                                            }
+                                        } else if (data.supportMessage) {
+                                            displaySupportMessage(data.supportMessage);
+                                        } else if (data.type === 'error') {
+                                            console.error('HTTP stream error:', data.message);
+                                            setStatus('HTTP Error: ' + data.message, 'error');
+                                            httpComplete = true;
+                                            resolve();
+                                        }
+                                    } catch (e) {
+                                        console.error('JSON parse error:', e, 'Data:', dataStr);
+                                        setStatus('Error: Invalid JSON in HTTP stream', 'error');
+                                        httpComplete = true;
+                                        resolve();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    readStream();
+                }).catch(e => {
+                    console.error('HTTP Streaming error:', e);
+                    setStatus('HTTP Streaming failed: ' + e.message, 'error');
+                    httpComplete = true;
+                    resolve();
+                });
+            });
+        }
+
+        async function compareLatencies() {
+            const sttMode = document.getElementById('sttSelect').value || 'local';
+            const llmMode = document.getElementById('llmSelect').value || 'gemini';
+            const ttsMode = document.getElementById('ttsSelect').value || 'gtts';
+            try {
+                setStatus('Comparing latencies...', 'streaming');
+                const res = await fetch(`${COMPARE_BASE}/compare?stt_mode=${sttMode}&llm_mode=${llmMode}&tts_mode=${ttsMode}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                const data = await res.json();
+                console.log('Compare Latencies response:', data);
+                const resultsDiv = document.getElementById('comparisonResults');
+                resultsDiv.innerHTML = `
+                    <h4>Simulated TTFC (ms):</h4>
+                    <p>WebSocket: $$ {data.websocket.ttfc_ms}ms ( $${data.websocket.notes})</p>
+                    <p>HTTP Streaming: $$ {data.http_streaming.ttfc_ms}ms ( $${data.http_streaming.notes})</p>
+                    <p><strong>Winner: ${data.winner}</strong> (Full response: ${data.full_response_time_ms}ms)</p>
+                `;
+                resultsDiv.style.display = 'block';
+                setStatus('Comparison complete!', 'complete');
+            } catch (err) {
+                console.error('Comparison error:', err);
+                setStatus('Comparison failed: ' + err.message, 'error');
+            }
+        }
+
+        function displaySupportMessage(supportMessage) {
+            console.log('Support message:', supportMessage);
+            const supportDiv = document.getElementById('supportMessage');
+            let html = '<div class="support-message">';
+            if (supportMessage.label) {
+                html += `<p><strong>${supportMessage.label}</strong></p>`;
+            }
+            if (supportMessage.options && supportMessage.options.length > 0) {
+                html += '<div class="options">';
+                supportMessage.options.forEach(option => {
+                    html += `<button class="option-btn" onclick="alert('Option: ${option}')">${option}</button>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            supportDiv.innerHTML = html;
+        }
+
+        function hexToBytes(hex) {
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes.push(parseInt(hex.substr(i, 2), 16));
+            }
+            return new Uint8Array(bytes);
+        }
+    </script>
+</body>
+</html>
+
+
+
+
+
+<!-- <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Comparison - WebSocket vs HTTP Streaming</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        select {
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            width: 150px;
+        }
+        button {
+            padding: 12px 30px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .comparison-group {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f0f8ff;
+            border-radius: 5px;
+        }
+        .comparison-btn {
+            background-color: #28a745;
+            margin: 5px;
+        }
+        .comparison-btn:hover {
+            background-color: #218838;
+        }
+        .response-container {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            border: 1px solid #dee2e6;
+        }
+        .streaming-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .support-message {
+            margin-top: 15px;
+            padding: 15px;
+            background-color: #e7f3ff;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .option-btn {
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .option-btn:hover {
+            background-color: #218838;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.streaming {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status.complete {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        audio {
+            margin-top: 10px;
+            width: 100%;
+        }
+        #comparisonResults {
+            margin-top: 20px;
+            padding: 15px;
+            background: #d4edda;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Voice Agent Comparison: WebSocket vs HTTP Streaming</h1>
+        <p>Select STT, LLM, and TTS modes, then press <strong>Start</strong> to begin a conversation and <strong>End</strong> to stop. Speak and pause – WebSocket and HTTP Streaming responses will appear sequentially for TTFC comparison.</p>
+        
+        <div class="input-group">
+            <select id="sttSelect">
+                <option value="local">Local Whisper (Offline)</option>
+                <option value="groq">Groq Whisper (Online)</option>
+            </select>
+            <select id="llmSelect">
+                <option value="gemini">Gemini (Google)</option>
+                <option value="groq">Groq (Llama3)</option>
+            </select>
+            <select id="ttsSelect">
+                <option value="gtts">gTTS (Simple)</option>
+                <option value="coqui">Coqui (Voice Cloning)</option>
+                <option value="kokoro">Kokoro (Realistic)</option>
+                <option value="edge">Edge TTS (Microsoft)</option>
+            </select>
+            <button id="startBtn" onclick="startConversation()">Start</button>
+            <button id="endBtn" onclick="stopConversation()" disabled>End</button>
+            <a href="/voice_agent"><button>Back to Main Interface</button></a>
+        </div>
+
+        <div class="comparison-group">
+            <h3>Simulated Latency Comparison (TTFC)</h3>
+            <button class="comparison-btn" onclick="compareLatencies()">Compare Latencies</button>
+            <div id="comparisonResults" style="display: none;"></div>
+        </div>
+
+        <div class="status" id="status" style="display: none;"></div>
+
+        <div class="response-container">
+            <div class="streaming-text" id="response">Conversation will appear here...</div>
+            <div id="supportMessage"></div>
+            <audio id="audioPlayer" controls><source src="" type="audio/mp3"></audio>
+        </div>
+    </div>
+
+    <script>
+        const COMPARE_BASE = 'http://127.0.0.1:8000/compare';
+        let mediaRecorder;
+        let audioChunks = [];
+        let stream;
+        let audioContext;
+        let analyser;
+        let silenceStart;
+        let recordingStartTime;
+        const SILENCE_THRESHOLD = -45;          // dB
+        const SILENCE_DURATION = 2000;         // 2 seconds
+        const MIN_RECORDING_DURATION = 800;    // 0.8 seconds
+        const TIMESLICE = 100;                 // 100 ms chunks
+        let isRecording = false;
+        let assistantIsSpeaking = false;       // blocks silence detection while audio plays
+        let wsComplete = false;               // tracks WebSocket completion
+        let httpComplete = false;             // tracks HTTP completion
+
+        function setStatus(msg, type) {
+            const el = document.getElementById('status');
+            el.textContent = msg;
+            el.className = 'status ' + type;
+            el.style.display = 'block';
+        }
+
+        async function checkMicPermission() {
+            try {
+                const permissionStatus = await navigator.permissions.query({ name: 'microphone' });
+                if (permissionStatus.state === 'denied') {
+                    throw new Error('Microphone permission denied. Please allow microphone access in your browser settings.');
+                }
+                return permissionStatus.state === 'granted';
+            } catch (e) {
+                console.error('Permission check error:', e);
+                return false;
+            }
+        }
+
+        async function startConversation() {
+            const sttMode = document.getElementById('sttSelect').value;
+            const llmMode = document.getElementById('llmSelect').value;
+            const ttsMode = document.getElementById('ttsSelect').value;
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('endBtn').disabled = false;
+            document.getElementById('response').textContent = '';
+            document.getElementById('supportMessage').innerHTML = '';
+            document.getElementById('audioPlayer').src = '';
+            setStatus('Recording…', 'streaming');
+
+            try {
+                const hasPermission = await checkMicPermission();
+                if (!hasPermission) {
+                    throw new Error('Microphone access not granted. Please allow microphone access and try again.');
+                }
+
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                if (audioContext && audioContext.state !== 'closed') await audioContext.close();
+
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+                analyser.fftSize = 2048;
+                const dataArray = new Float32Array(analyser.fftSize);
+
+                audioChunks = [];
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+                mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+                mediaRecorder.start(TIMESLICE);
+                isRecording = true;
+                recordingStartTime = Date.now();
+                console.log('Recording started');
+
+                function checkSilence() {
+                    if (!isRecording || assistantIsSpeaking) return;
+                    analyser.getFloatTimeDomainData(dataArray);
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+                    const rms = Math.sqrt(sum / dataArray.length);
+                    const db = 20 * Math.log10(rms + Number.EPSILON);
+                    if (db < SILENCE_THRESHOLD) {
+                        if (!silenceStart) silenceStart = Date.now();
+                        else if (Date.now() - silenceStart > SILENCE_DURATION &&
+                                 Date.now() - recordingStartTime > MIN_RECORDING_DURATION) {
+                            console.log('Silence detected → sending query');
+                            processQuery(sttMode, llmMode, ttsMode);
+                            return;
+                        }
+                    } else {
+                        silenceStart = null;
+                    }
+                    requestAnimationFrame(checkSilence);
+                }
+                requestAnimationFrame(checkSilence);
+            } catch (e) {
+                console.error('Start error:', e);
+                setStatus(`Recording failed: ${e.message}. Please check microphone permissions or refresh the page.`, 'error');
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                if (audioContext && audioContext.state !== 'closed') audioContext.close();
+                stream = null;
+                audioContext = null;
+            }
+        }
+
+        async function processQuery(sttMode, llmMode, ttsMode) {
+            if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+
+            mediaRecorder.stop();
+            mediaRecorder.onstop = async () => {
+                if (audioChunks.length === 0 || audioChunks.every(c => c.size === 0)) {
+                    console.log('Empty audio – skipping');
+                    if (isRecording) resumeRecording(sttMode, llmMode, ttsMode);
+                    return;
+                }
+
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                // Process WebSocket first, then HTTP
+                await processWebSocket(audioBlob, sttMode, llmMode, ttsMode);
+                if (isRecording) await processHttp(audioBlob, sttMode, llmMode, ttsMode);
+            };
+        }
+
+        async function processWebSocket(audioBlob, sttMode, llmMode, ttsMode) {
+            return new Promise((resolve) => {
+                const wsUrl = `${COMPARE_BASE}/ws-stream?stt_mode=${sttMode}&tts_mode=${ttsMode}&llm_mode=${llmMode}`.replace('http://', 'ws://');
+                const ws = new WebSocket(wsUrl);
+                const startTime = performance.now();
+                let transcription = '';
+                let fullResponse = '';
+
+                ws.onopen = () => {
+                    console.log('WebSocket Connected');
+                    ws.send(audioBlob);
+                };
+                ws.onmessage = async (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'transcription') {
+                            transcription = data.text.trim();
+                            if (transcription) {
+                                document.getElementById('response').textContent += `\nWebSocket Transcription: ${data.text}\n`;
+                            }
+                        } else if (data.type === 'text_chunk' && data.chunk) {
+                            fullResponse += data.chunk;
+                            document.getElementById('response').textContent = document.getElementById('response').textContent.replace(/WebSocket Response:[^\n]*/g, '');
+                            document.getElementById('response').textContent += `WebSocket Response: ${fullResponse}`;
+                            if (data.ttfc) {
+                                const clientTtfc = performance.now() - startTime;
+                                document.getElementById('response').textContent += `\nWebSocket TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)\n`;
+                                console.log(`WebSocket TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)`);
+                            }
+                        } else if (data.type === 'complete') {
+                            setStatus('WebSocket Complete!', 'complete');
+                            if (data.supportMessage) displaySupportMessage(data.supportMessage);
+                            wsComplete = true;
+                            if (wsComplete && httpComplete && isRecording) resumeRecording(sttMode, llmMode, ttsMode);
+                            resolve();
+                        } else if (data.type === 'error') {
+                            setStatus('WebSocket Error: ' + data.message, 'error');
+                            wsComplete = true;
+                            resolve();
+                        }
+                    } catch (e) {
+                        const audioBlob = new Blob([event.data], { type: 'audio/mp3' });
+                        document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                        document.getElementById('audioPlayer').play();
+                        assistantIsSpeaking = true;
+                        document.getElementById('audioPlayer').onended = () => {
+                            assistantIsSpeaking = false;
+                            wsComplete = true;
+                            if (wsComplete && httpComplete && isRecording) resumeRecording(sttMode, llmMode, ttsMode);
+                            resolve();
+                        };
+                        setStatus('Playing WebSocket audio...', 'complete');
+                    }
+                };
+                ws.onerror = (err) => {
+                    setStatus('WebSocket Error: Connection failed', 'error');
+                    console.error('WebSocket Error:', err);
+                    wsComplete = true;
+                    resolve();
+                };
+                ws.onclose = () => {
+                    console.log('WebSocket Closed');
+                    if (!isRecording && wsComplete && httpComplete) setStatus('Conversation ended', 'complete');
+                };
+            });
+        }
+
+        async function processHttp(audioBlob, sttMode, llmMode, ttsMode) {
+            return new Promise((resolve) => {
+                const formData = new FormData();
+                formData.append('file', audioBlob, 'query.webm');
+                const startTime = performance.now();
+                let transcription = '';
+
+                fetch(`${COMPARE_BASE}/http-stream?stt_mode=${sttMode}&tts_mode=${ttsMode}&llm_mode=${llmMode}`, {
+                    method: 'POST',
+                    body: formData
+                }).then(res => {
+                    if (!res.ok) {
+                        return res.text().then(errorText => {
+                            setStatus('HTTP Error: ' + errorText, 'error');
+                            httpComplete = true;
+                            resolve();
+                            throw new Error(errorText);
+                        });
+                    }
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    let fullResponse = '';
+
+                    async function readStream() {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) {
+                                httpComplete = true;
+                                if (wsComplete && httpComplete && isRecording) resumeRecording(sttMode, llmMode, ttsMode);
+                                resolve();
+                                break;
+                            }
+                            buffer += decoder.decode(value, { stream: true });
+                            const lines = buffer.split('\n\n');
+                            buffer = lines.pop();
+                            for (const line of lines) {
+                                if (line.startsWith('event: done')) {
+                                    setStatus('HTTP Complete!', 'complete');
+                                    continue;
+                                }
+                                if (!line.startsWith('data: ')) continue;
+                                const dataStr = line.slice(6).trim();
+                                if (dataStr === '[DONE]') continue;
+                                if (dataStr) {
+                                    try {
+                                        const data = JSON.parse(dataStr);
+                                        if (data.type === 'transcription') {
+                                            transcription = data.text.trim();
+                                            if (transcription) {
+                                                document.getElementById('response').textContent += `\nHTTP Transcription: ${data.text}\n`;
+                                            }
+                                        } else if (data.type === 'text_chunk' && data.chunk) {
+                                            fullResponse += data.chunk;
+                                            document.getElementById('response').textContent = document.getElementById('response').textContent.replace(/HTTP Response:[^\n]*/g, '');
+                                            document.getElementById('response').textContent += `HTTP Response: ${fullResponse}`;
+                                            if (data.ttfc) {
+                                                const clientTtfc = performance.now() - startTime;
+                                                document.getElementById('response').textContent += `\nHTTP TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)\n`;
+                                                console.log(`HTTP TTFC: ${clientTtfc.toFixed(2)}ms (Server: ${(data.ttfc * 1000).toFixed(2)}ms)`);
+                                            }
+                                        } else if (data.type === 'audio') {
+                                            const audioBlob = new Blob([hexToBytes(data.data)], { type: 'audio/mp3' });
+                                            document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                                            document.getElementById('audioPlayer').play();
+                                            assistantIsSpeaking = true;
+                                            document.getElementById('audioPlayer').onended = () => {
+                                                assistantIsSpeaking = false;
+                                                httpComplete = true;
+                                                if (wsComplete && httpComplete && isRecording) resumeRecording(sttMode, llmMode, ttsMode);
+                                                resolve();
+                                            };
+                                            setStatus('Playing HTTP audio...', 'complete');
+                                        } else if (data.supportMessage) {
+                                            displaySupportMessage(data.supportMessage);
+                                        } else if (data.type === 'error') {
+                                            setStatus('HTTP Error: ' + data.message, 'error');
+                                            httpComplete = true;
+                                            resolve();
+                                        }
+                                    } catch (e) {
+                                        console.error('JSON parse error:', e, 'Data:', dataStr);
+                                        setStatus('Error: Invalid JSON in stream', 'error');
+                                        httpComplete = true;
+                                        resolve();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    readStream();
+                }).catch(e => {
+                    console.error('HTTP Streaming error:', e);
+                    setStatus('HTTP Streaming failed: ' + e.message, 'error');
+                    httpComplete = true;
+                    resolve();
+                });
+            });
+        }
+
+        async function resumeRecording(sttMode, llmMode, ttsMode) {
+            if (!isRecording) return;
+
+            try {
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                if (audioContext && audioContext.state !== 'closed') await audioContext.close();
+
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+                analyser.fftSize = 2048;
+                const dataArray = new Float32Array(analyser.fftSize);
+
+                audioChunks = [];
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+                mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+                mediaRecorder.start(TIMESLICE);
+                recordingStartTime = Date.now();
+                console.log('Resumed recording');
+                setStatus('Recording…', 'streaming');
+
+                function checkSilence() {
+                    if (!isRecording || assistantIsSpeaking) return;
+                    analyser.getFloatTimeDomainData(dataArray);
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+                    const rms = Math.sqrt(sum / dataArray.length);
+                    const db = 20 * Math.log10(rms + Number.EPSILON);
+                    if (db < SILENCE_THRESHOLD) {
+                        if (!silenceStart) silenceStart = Date.now();
+                        else if (Date.now() - silenceStart > SILENCE_DURATION &&
+                                 Date.now() - recordingStartTime > MIN_RECORDING_DURATION) {
+                            console.log('Silence detected → sending next query');
+                            processQuery(sttMode, llmMode, ttsMode);
+                            return;
+                        }
+                    } else {
+                        silenceStart = null;
+                    }
+                    requestAnimationFrame(checkSilence);
+                }
+                requestAnimationFrame(checkSilence);
+            } catch (e) {
+                console.error('Resume error:', e);
+                setStatus(`Resume failed: ${e.message}. Please check microphone permissions or refresh the page.`, 'error');
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('endBtn').disabled = true;
+                isRecording = false;
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                if (audioContext && audioContext.state !== 'closed') audioContext.close();
+                stream = null;
+                audioContext = null;
+            }
+        }
+
+        function stopConversation() {
+            isRecording = false;
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+            if (stream) {
+                stream.getTracks().forEach(t => t.stop());
+                stream = null;
+            }
+            if (audioContext && audioContext.state !== 'closed') audioContext.close();
+            audioContext = null;
+            mediaRecorder = null;
+            audioChunks = [];
+            assistantIsSpeaking = false;
+            wsComplete = false;
+            httpComplete = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('endBtn').disabled = true;
+            setStatus('Conversation ended', 'complete');
+            console.log('Conversation stopped');
+
+            setTimeout(() => {
+                console.log('Microphone release delay completed');
+            }, 100);
+        }
+
+        async function compareLatencies() {
+            const sttMode = document.getElementById('sttSelect').value || 'local';
+            const llmMode = document.getElementById('llmSelect').value || 'gemini';
+            const ttsMode = document.getElementById('ttsSelect').value || 'gtts';
+            try {
+                setStatus('Comparing latencies...', 'streaming');
+                const res = await fetch(`${COMPARE_BASE}/compare?stt_mode=${sttMode}&llm_mode=${llmMode}&tts_mode=${ttsMode}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                const data = await res.json();
+                const resultsDiv = document.getElementById('comparisonResults');
+                resultsDiv.innerHTML = `
+                    <h4>Simulated TTFC (ms):</h4>
+                    <p>WebSocket: ${data.websocket.ttfc_ms}ms (${data.websocket.notes})</p>
+                    <p>HTTP Streaming: ${data.http_streaming.ttfc_ms}ms (${data.http_streaming.notes})</p>
+                    <p><strong>Winner: ${data.winner}</strong> (Full response: ${data.full_response_time_ms}ms)</p>
+                `;
+                resultsDiv.style.display = 'block';
+                setStatus('Comparison complete!', 'complete');
+            } catch (err) {
+                setStatus('Comparison failed: ' + err.message, 'error');
+                console.error('Comparison error:', err);
+            }
+        }
+
+        function displaySupportMessage(supportMessage) {
+            const supportDiv = document.getElementById('supportMessage');
+            let html = '<div class="support-message">';
+            if (supportMessage.label) {
+                html += `<p><strong>${supportMessage.label}</strong></p>`;
+            }
+            if (supportMessage.options && supportMessage.options.length > 0) {
+                html += '<div class="options">';
+                supportMessage.options.forEach(option => {
+                    html += `<button class="option-btn" onclick="alert('Option: ${option}')">${option}</button>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            supportDiv.innerHTML = html;
+        }
+
+        function hexToBytes(hex) {
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes.push(parseInt(hex.substr(i, 2), 16));
+            }
+            return new Uint8Array(bytes);
+        }
+    </script>
+</body>
+</html> -->
